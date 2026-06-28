@@ -132,7 +132,12 @@ function PriceChart({
           }}
           labelStyle={{ color: "#6b7280" }}
           itemStyle={{ color: "#e5e7eb" }}
-          formatter={(value: number) => [value.toFixed(2), "Cierre"]}
+          formatter={(
+            value: number | undefined | null | string | readonly (string | number)[]
+          ) => {
+            if (typeof value !== "number") return ["", "Cierre"];
+            return [value.toFixed(2), "Cierre"];
+          }}
         />
         <Line
           type="monotone"
