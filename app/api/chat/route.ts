@@ -5,8 +5,10 @@ import { CedearLookupError, fetchCedearQuote } from "@/lib/yahoo-finance";
 const ANTHROPIC_API_URL = "https://api.anthropic.com/v1/messages";
 const CLAUDE_MODEL = "claude-sonnet-4-6";
 const MAX_TOKENS = 1024;
-const MAX_TOOL_ITERATIONS = 3;
+const MAX_TOOL_ITERATIONS = 4;
 const TOOL_NAME = "buscar_empresa";
+const FOLLOWUP_TOOL_NAME = "sugerir_preguntas";
+const MAX_FOLLOWUP_QUESTIONS = 3;
 
 class ChatError extends Error {
   status: number;
@@ -68,6 +70,30 @@ const TOOLS = [
       required: ["query"],
     },
   },
+  {
+    name: FOLLOWUP_TOOL_NAME,
+    description:
+      "Sugiere 2 o 3 preguntas de seguimiento concretas para que el usuario las toque y las envíe tal cual. Se llama siempre al final de la respuesta, después de escribir el texto.",
+    input_schema: {
+      type: "object",
+      properties: {
+        questions: {
+          type: "array",
+          items: { type: "string" },
+          minItems: 2,
+          maxItems: MAX_FOLLOWUP_QUESTIONS,
+          description:
+            "2 o 3 preguntas de seguimiento específicas, basadas en datos reales ya mencionados (fechas, magnitudes, anomalías), redactadas en primera persona como las escribiría el usuario.",
+        },
+      },
+      required: ["questions"],
+    },
+  },
+  {
+    type: "web_search_20260209",
+    name: "web_search",
+    max_uses: 3,
+  },
 ];
 
 function formatQuoteContext(quote: CedearQuote): string {
@@ -86,14 +112,24 @@ Histórico de los últimos ${quote.historical.length} días hábiles:
 ${historicalTable}`;
 }
 
-function buildSystemPrompt(currentQuote: CedearQuote | null): string {
+function buildSystemPrompt(
+  currentQuote: CedearQuote | null,
+  previousQuestions: string[]
+): string {
   const contextBlock = currentQuote
     ? formatQuoteContext(currentQuote)
     : "Todavía no hay ninguna empresa cargada en esta conversación.";
 
+  const previousQuestionsBlock =
+    previousQuestions.length > 0
+      ? `\n\nPreguntas de seguimiento que ya sugeriste antes en esta conversación (no las repitas ni sugieras otras muy parecidas):\n${previousQuestions
+          .map((q) => `- ${q}`)
+          .join("\n")}`
+      : "";
+
   return `Sos un asistente de chat que analiza datos de mercado de empresas (CEDEARs) para inversores argentinos no profesionales.
 
-${contextBlock}
+${contextBlock}${previousQuestionsBlock}
 
 Reglas:
 - Si el usuario menciona una empresa distinta a la que está cargada arriba (o todavía no hay ninguna cargada), usá la herramienta "${TOOL_NAME}" con el nombre o código que escribió, antes de responder.
@@ -108,7 +144,10 @@ No agregues introducción, saludo ni cierre fuera de esas cuatro secciones. Si n
 - Si la herramienta no encuentra resultados para el nombre que escribió el usuario, y vos sabés cuál es el código de esa empresa, volvé a llamar la herramienta usando ese código antes de responder, sin preguntarle al usuario primero. Solo si seguís sin encontrarla, explicaselo con claridad y pedile que aclare el nombre o código (en un párrafo normal, sin secciones).
 - Nunca recomiendes comprar, vender o mantener ningún activo, ni opines sobre si es buen o mal momento para operar. Limitate a describir lo que muestran los datos.
 - No uses la palabra "ticker"; decí "empresa" o "código".
-- Usá lenguaje simple, sin jerga financiera. No uses Markdown (sin #, sin **).`;
+- Usá lenguaje simple, sin jerga financiera. No uses Markdown (sin #, sin **).
+- Los datos de precio, variación e histórico de volumen no explican por sí solos el motivo de un movimiento. Si la pregunta del usuario es sobre la causa de una suba o baja, noticias, eventos corporativos (resultados, fusiones, demandas, anuncios) u otros fundamentos que no están en los datos numéricos que tenés, usá la herramienta de búsqueda web para complementar tu respuesta antes de responder. Si podés responder completamente con los datos de precio y volumen que ya tenés, no uses la búsqueda web.
+- Después de escribir tu respuesta (el análisis completo o una respuesta puntual), llamá siempre a la herramienta "${FOLLOWUP_TOOL_NAME}" con 2 o 3 preguntas de seguimiento. Tienen que basarse en datos concretos que ya mencionaste (una fecha puntual, una variación específica, un volumen inusual, una anomalía), nunca preguntas genéricas como "¿querés saber algo más?". Escribilas en primera persona, tal como las escribiría el usuario, listas para enviar (ej: "¿Por qué bajó tan fuerte el 25 de junio?"). No llames a esta herramienta si todavía no escribiste ninguna respuesta (por ejemplo, mientras estás buscando una empresa).
+- Nunca repitas una pregunta de seguimiento que ya sugeriste antes en esta conversación.`;
 }
 
 interface SSEEvent {
@@ -254,12 +293,14 @@ function isChatRequest(value: unknown): value is {
   message: string;
   history: ChatTurn[];
   quote: CedearQuote | null;
+  previousQuestions?: string[];
 } {
   if (!value || typeof value !== "object") return false;
   const v = value as Record<string, unknown>;
   if (typeof v.message !== "string" || !v.message.trim()) return false;
   if (!Array.isArray(v.history)) return false;
   if (v.quote !== null && typeof v.quote !== "object") return false;
+  if (v.previousQuestions !== undefined && !Array.isArray(v.previousQuestions)) return false;
   return true;
 }
 
@@ -283,7 +324,8 @@ export async function POST(request: NextRequest) {
     return Response.json({ error: "Falta el mensaje del usuario" }, { status: 400 });
   }
 
-  const { message, history, quote: currentQuote } = body;
+  const { message, history, quote: currentQuote, previousQuestions = [] } = body;
+  const askedQuestions = previousQuestions.filter((q): q is string => typeof q === "string");
 
   const messages: AnthropicMessage[] = [
     ...history.map((turn) => ({ role: turn.role, content: turn.content })),
@@ -303,23 +345,55 @@ export async function POST(request: NextRequest) {
         let iterations = 0;
         let turn = await streamClaudeTurn(
           apiKey,
-          buildSystemPrompt(currentQuote),
+          buildSystemPrompt(currentQuote, askedQuestions),
           messages,
           (text) => send({ type: "text", text })
         );
 
-        while (turn.stopReason === "tool_use" && iterations < MAX_TOOL_ITERATIONS) {
+        while (
+          (turn.stopReason === "tool_use" || turn.stopReason === "pause_turn") &&
+          iterations < MAX_TOOL_ITERATIONS
+        ) {
           iterations++;
-          const toolUse = turn.content.find(
+
+          if (turn.stopReason === "pause_turn") {
+            // Server-side tool (web search) hit its internal iteration cap.
+            // Resend as-is to let it resume — no extra user message.
+            messages.push({ role: "assistant", content: turn.content });
+            turn = await streamClaudeTurn(
+              apiKey,
+              buildSystemPrompt(newQuote ?? currentQuote, askedQuestions),
+              messages,
+              (text) => send({ type: "text", text })
+            );
+            continue;
+          }
+
+          const toolUses = turn.content.filter(
             (block): block is AnthropicToolUseBlock => block.type === "tool_use"
           );
-          if (!toolUse) break;
+          if (toolUses.length === 0) break;
+
+          const searchToolUse = toolUses.find((t) => t.name === TOOL_NAME);
+          const followUpToolUse = toolUses.find((t) => t.name === FOLLOWUP_TOOL_NAME);
+
+          if (followUpToolUse) {
+            const rawQuestions = followUpToolUse.input.questions;
+            if (Array.isArray(rawQuestions)) {
+              const questions = rawQuestions
+                .filter((q): q is string => typeof q === "string")
+                .slice(0, MAX_FOLLOWUP_QUESTIONS);
+              if (questions.length > 0) send({ type: "questions", questions });
+            }
+          }
+
+          if (!searchToolUse) break;
 
           messages.push({ role: "assistant", content: turn.content });
 
           let toolResultText: string;
           try {
-            const query = toolUse.input.query;
+            const query = searchToolUse.input.query;
             const found = await fetchCedearQuote(typeof query === "string" ? query : "");
             newQuote = found;
             toolResultText = formatQuoteContext(found);
@@ -331,20 +405,21 @@ export async function POST(request: NextRequest) {
                 : "No se pudo obtener la información solicitada.";
           }
 
-          messages.push({
-            role: "user",
-            content: [
-              {
-                type: "tool_result",
-                tool_use_id: toolUse.id,
-                content: toolResultText,
-              },
-            ],
-          });
+          const toolResults: AnthropicToolResultBlock[] = [
+            { type: "tool_result", tool_use_id: searchToolUse.id, content: toolResultText },
+          ];
+          if (followUpToolUse) {
+            toolResults.push({
+              type: "tool_result",
+              tool_use_id: followUpToolUse.id,
+              content: "ok",
+            });
+          }
+          messages.push({ role: "user", content: toolResults });
 
           turn = await streamClaudeTurn(
             apiKey,
-            buildSystemPrompt(newQuote ?? currentQuote),
+            buildSystemPrompt(newQuote ?? currentQuote, askedQuestions),
             messages,
             (text) => send({ type: "text", text })
           );

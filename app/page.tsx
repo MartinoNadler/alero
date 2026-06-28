@@ -19,6 +19,7 @@ interface DisplayTurn {
   text: string;
   quote?: CedearQuote;
   isError?: boolean;
+  followUpQuestions?: string[];
 }
 
 const WELCOME_TURN: DisplayTurn = {
@@ -224,7 +225,15 @@ function AnalysisText({ text }: { text: string }) {
   );
 }
 
-function MessageBubble({ turn }: { turn: DisplayTurn }) {
+function MessageBubble({
+  turn,
+  showFollowUps,
+  onSelectQuestion,
+}: {
+  turn: DisplayTurn;
+  showFollowUps: boolean;
+  onSelectQuestion: (question: string) => void;
+}) {
   if (turn.role === "user") {
     return (
       <div className="max-w-[85%] animate-message-in self-end rounded-2xl rounded-tr-sm bg-accent px-4 py-3 text-sm text-white">
@@ -234,15 +243,32 @@ function MessageBubble({ turn }: { turn: DisplayTurn }) {
   }
 
   return (
-    <div
-      className={
-        turn.isError
-          ? "max-w-[85%] animate-message-in self-start rounded-2xl rounded-tl-sm border border-down/30 bg-down/10 px-4 py-3 text-sm text-down"
-          : "w-full max-w-xl animate-message-in self-start rounded-2xl rounded-tl-sm bg-surface px-4 py-3 text-sm leading-relaxed"
-      }
-    >
-      {turn.quote && <QuoteCard quote={turn.quote} />}
-      <AnalysisText text={turn.text} />
+    <div className="flex w-full max-w-xl flex-col items-start gap-2">
+      <div
+        className={
+          turn.isError
+            ? "max-w-[85%] animate-message-in self-start rounded-2xl rounded-tl-sm border border-down/30 bg-down/10 px-4 py-3 text-sm text-down"
+            : "w-full animate-message-in self-start rounded-2xl rounded-tl-sm bg-surface px-4 py-3 text-sm leading-relaxed"
+        }
+      >
+        {turn.quote && <QuoteCard quote={turn.quote} />}
+        <AnalysisText text={turn.text} />
+      </div>
+
+      {showFollowUps && turn.followUpQuestions && turn.followUpQuestions.length > 0 && (
+        <div className="flex flex-wrap gap-2">
+          {turn.followUpQuestions.map((question) => (
+            <button
+              key={question}
+              type="button"
+              onClick={() => onSelectQuestion(question)}
+              className="rounded-full border border-accent bg-transparent px-3 py-1.5 text-left text-xs font-medium text-accent transition-colors hover:bg-accent hover:text-white"
+            >
+              {question}
+            </button>
+          ))}
+        </div>
+      )}
     </div>
   );
 }
@@ -291,6 +317,7 @@ function DisclaimerModal({ onClose }: { onClose: () => void }) {
 type StreamEvent =
   | { type: "text"; text: string }
   | { type: "quote"; quote: CedearQuote }
+  | { type: "questions"; questions: string[] }
   | { type: "error"; error: string };
 
 export default function Home() {
@@ -311,6 +338,7 @@ export default function Home() {
     if (!text || isBusy) return;
 
     const historyForApi = turns.map((t) => ({ role: t.role, content: t.text }));
+    const previousQuestions = turns.flatMap((t) => t.followUpQuestions ?? []);
 
     setTurns((prev) => [...prev, { id: crypto.randomUUID(), role: "user", text }]);
     setInput("");
@@ -334,6 +362,7 @@ export default function Home() {
           message: text,
           history: historyForApi,
           quote: currentQuote,
+          previousQuestions,
         }),
       });
 
@@ -375,6 +404,13 @@ export default function Home() {
             setCurrentQuote(event.quote);
             setTurns((prev) =>
               prev.map((t) => (t.id === assistantId ? { ...t, quote: event.quote } : t))
+            );
+          } else if (event.type === "questions") {
+            ensureAssistantTurn();
+            setTurns((prev) =>
+              prev.map((t) =>
+                t.id === assistantId ? { ...t, followUpQuestions: event.questions } : t
+              )
             );
           } else if (event.type === "error") {
             streamError = event.error;
@@ -419,8 +455,13 @@ export default function Home() {
 
       <main className="flex-1 overflow-y-auto px-4 py-4 sm:px-8">
         <div className="mx-auto flex max-w-2xl flex-col items-start gap-3">
-          {turns.map((turn) => (
-            <MessageBubble key={turn.id} turn={turn} />
+          {turns.map((turn, i) => (
+            <MessageBubble
+              key={turn.id}
+              turn={turn}
+              showFollowUps={i === turns.length - 1}
+              onSelectQuestion={sendMessage}
+            />
           ))}
 
           {showSuggestions && !isBusy && (
