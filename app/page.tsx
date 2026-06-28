@@ -295,11 +295,17 @@ function DisclaimerModal({ onClose }: { onClose: () => void }) {
   );
 }
 
+type StreamEvent =
+  | { type: "text"; text: string }
+  | { type: "quote"; quote: CedearQuote }
+  | { type: "error"; error: string };
+
 export default function Home() {
   const [turns, setTurns] = useState<DisplayTurn[]>([WELCOME_TURN]);
   const [input, setInput] = useState("");
   const [currentQuote, setCurrentQuote] = useState<CedearQuote | null>(null);
   const [isBusy, setIsBusy] = useState(false);
+  const [streamingId, setStreamingId] = useState<string | null>(null);
   const [showDisclaimer, setShowDisclaimer] = useState(false);
   const bottomRef = useRef<HTMLDivElement>(null);
 
@@ -317,6 +323,16 @@ export default function Home() {
     setInput("");
     setIsBusy(true);
 
+    const assistantId = crypto.randomUUID();
+    let assistantTurnCreated = false;
+
+    function ensureAssistantTurn() {
+      if (assistantTurnCreated) return;
+      assistantTurnCreated = true;
+      setStreamingId(assistantId);
+      setTurns((prev) => [...prev, { id: assistantId, role: "assistant", text: "" }]);
+    }
+
     try {
       const response = await fetch("/api/chat", {
         method: "POST",
@@ -327,25 +343,54 @@ export default function Home() {
           quote: currentQuote,
         }),
       });
-      const data = await response.json();
 
       if (!response.ok) {
-        throw new Error(data.error ?? "No se pudo obtener una respuesta");
+        const data = await response.json().catch(() => null);
+        throw new Error(data?.error ?? "No se pudo obtener una respuesta");
+      }
+      if (!response.body) {
+        throw new Error("La respuesta del servidor no incluyó contenido");
       }
 
-      setTurns((prev) => [
-        ...prev,
-        {
-          id: crypto.randomUUID(),
-          role: "assistant",
-          text: data.reply as string,
-          quote: (data.quote as CedearQuote | null) ?? undefined,
-        },
-      ]);
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = "";
+      let streamError: string | null = null;
 
-      if (data.quote) {
-        setCurrentQuote(data.quote as CedearQuote);
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+
+        let newlineIndex: number;
+        while ((newlineIndex = buffer.indexOf("\n")) !== -1) {
+          const line = buffer.slice(0, newlineIndex).trim();
+          buffer = buffer.slice(newlineIndex + 1);
+          if (!line) continue;
+
+          const event = JSON.parse(line) as StreamEvent;
+
+          if (event.type === "text") {
+            ensureAssistantTurn();
+            setTurns((prev) =>
+              prev.map((t) =>
+                t.id === assistantId ? { ...t, text: t.text + event.text } : t
+              )
+            );
+          } else if (event.type === "quote") {
+            ensureAssistantTurn();
+            setCurrentQuote(event.quote);
+            setTurns((prev) =>
+              prev.map((t) => (t.id === assistantId ? { ...t, quote: event.quote } : t))
+            );
+          } else if (event.type === "error") {
+            streamError = event.error;
+          }
+        }
       }
+
+      if (streamError) throw new Error(streamError);
+      if (!assistantTurnCreated) throw new Error("Claude no devolvió una respuesta");
     } catch (err) {
       setTurns((prev) => [
         ...prev,
@@ -360,6 +405,7 @@ export default function Home() {
         },
       ]);
     } finally {
+      setStreamingId(null);
       setIsBusy(false);
     }
   }
@@ -399,7 +445,7 @@ export default function Home() {
             </div>
           )}
 
-          {isBusy && (
+          {isBusy && !streamingId && (
             <div className="w-full max-w-xl animate-message-in self-start rounded-2xl rounded-tl-sm bg-surface px-4 py-3 text-sm">
               <span className="inline-flex gap-1">
                 <span

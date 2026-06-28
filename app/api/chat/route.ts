@@ -1,4 +1,4 @@
-import { NextResponse, type NextRequest } from "next/server";
+import { type NextRequest } from "next/server";
 import type { CedearQuote } from "@/lib/cedear";
 import { CedearLookupError, fetchCedearQuote } from "@/lib/yahoo-finance";
 
@@ -44,12 +44,6 @@ type AnthropicContentBlock =
 interface AnthropicMessage {
   role: "user" | "assistant";
   content: string | AnthropicContentBlock[];
-}
-
-interface AnthropicResponse {
-  content: AnthropicContentBlock[];
-  stop_reason: string;
-  error?: { type: string; message: string };
 }
 
 interface ChatTurn {
@@ -117,11 +111,57 @@ No agregues introducción, saludo ni cierre fuera de esas cuatro secciones. Si n
 - Usá lenguaje simple, sin jerga financiera. No uses Markdown (sin #, sin **).`;
 }
 
-async function callClaude(
+interface SSEEvent {
+  event: string;
+  data: Record<string, unknown>;
+}
+
+async function* parseSSE(body: ReadableStream<Uint8Array>): AsyncGenerator<SSEEvent> {
+  const reader = body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+
+      let separatorIndex: number;
+      while ((separatorIndex = buffer.indexOf("\n\n")) !== -1) {
+        const rawEvent = buffer.slice(0, separatorIndex);
+        buffer = buffer.slice(separatorIndex + 2);
+
+        let eventType = "message";
+        const dataLines: string[] = [];
+        for (const line of rawEvent.split("\n")) {
+          if (line.startsWith("event:")) eventType = line.slice(6).trim();
+          else if (line.startsWith("data:")) dataLines.push(line.slice(5).trim());
+        }
+        if (dataLines.length === 0) continue;
+
+        try {
+          yield { event: eventType, data: JSON.parse(dataLines.join("\n")) };
+        } catch {
+          // ignore malformed SSE event
+        }
+      }
+    }
+  } finally {
+    reader.releaseLock();
+  }
+}
+
+type StreamBlock =
+  | { type: "text"; text: string }
+  | { type: "tool_use"; id: string; name: string; inputJson: string };
+
+async function streamClaudeTurn(
   apiKey: string,
   system: string,
-  messages: AnthropicMessage[]
-): Promise<AnthropicResponse> {
+  messages: AnthropicMessage[],
+  onTextDelta: (text: string) => void
+): Promise<{ content: AnthropicContentBlock[]; stopReason: string }> {
   let response: Response;
   try {
     response = await fetch(ANTHROPIC_API_URL, {
@@ -137,31 +177,77 @@ async function callClaude(
         system,
         tools: TOOLS,
         messages,
+        stream: true,
       }),
     });
   } catch {
     throw new ChatError("No se pudo conectar con la API de Claude", 502);
   }
 
-  let data: AnthropicResponse;
-  try {
-    data = await response.json();
-  } catch {
-    throw new ChatError(
-      `La API de Claude respondió con el estado ${response.status}`,
-      502
-    );
+  if (!response.ok || !response.body) {
+    let message = `La API de Claude respondió con el estado ${response.status}`;
+    try {
+      const errBody = await response.json();
+      message = errBody?.error?.message ?? message;
+    } catch {
+      // keep default message
+    }
+    throw new ChatError(message, 502);
   }
 
-  if (!response.ok || data.error) {
-    throw new ChatError(
-      data.error?.message ??
-        `La API de Claude respondió con el estado ${response.status}`,
-      502
-    );
+  const blocks: StreamBlock[] = [];
+  let stopReason = "end_turn";
+
+  for await (const { data } of parseSSE(response.body)) {
+    const type = data.type as string;
+
+    if (type === "content_block_start") {
+      const index = data.index as number;
+      const block = data.content_block as { type: string; id?: string; name?: string };
+      if (block.type === "text") {
+        blocks[index] = { type: "text", text: "" };
+      } else if (block.type === "tool_use") {
+        blocks[index] = {
+          type: "tool_use",
+          id: block.id ?? "",
+          name: block.name ?? "",
+          inputJson: "",
+        };
+      }
+    } else if (type === "content_block_delta") {
+      const index = data.index as number;
+      const block = blocks[index];
+      const delta = data.delta as { type: string; text?: string; partial_json?: string };
+      if (!block) continue;
+      if (delta.type === "text_delta" && block.type === "text") {
+        block.text += delta.text ?? "";
+        onTextDelta(delta.text ?? "");
+      } else if (delta.type === "input_json_delta" && block.type === "tool_use") {
+        block.inputJson += delta.partial_json ?? "";
+      }
+    } else if (type === "message_delta") {
+      const delta = data.delta as { stop_reason?: string };
+      if (delta?.stop_reason) stopReason = delta.stop_reason;
+    } else if (type === "error") {
+      const error = data.error as { message?: string } | undefined;
+      throw new ChatError(error?.message ?? "Error en el stream de Claude", 502);
+    }
   }
 
-  return data;
+  const content: AnthropicContentBlock[] = blocks
+    .filter((block): block is StreamBlock => Boolean(block))
+    .map((block) => {
+      if (block.type === "text") return { type: "text", text: block.text };
+      let input: Record<string, unknown> = {};
+      try {
+        input = block.inputJson ? JSON.parse(block.inputJson) : {};
+      } catch {
+        input = {};
+      }
+      return { type: "tool_use", id: block.id, name: block.name, input };
+    });
+
+  return { content, stopReason };
 }
 
 function isChatRequest(value: unknown): value is {
@@ -180,7 +266,7 @@ function isChatRequest(value: unknown): value is {
 export async function POST(request: NextRequest) {
   const apiKey = process.env.ANTHROPIC_API_KEY;
   if (!apiKey) {
-    return NextResponse.json(
+    return Response.json(
       { error: "Falta configurar ANTHROPIC_API_KEY en el servidor" },
       { status: 500 }
     );
@@ -190,17 +276,11 @@ export async function POST(request: NextRequest) {
   try {
     body = await request.json();
   } catch {
-    return NextResponse.json(
-      { error: "Body inválido, se esperaba JSON" },
-      { status: 400 }
-    );
+    return Response.json({ error: "Body inválido, se esperaba JSON" }, { status: 400 });
   }
 
   if (!isChatRequest(body)) {
-    return NextResponse.json(
-      { error: "Falta el mensaje del usuario" },
-      { status: 400 }
-    );
+    return Response.json({ error: "Falta el mensaje del usuario" }, { status: 400 });
   }
 
   const { message, history, quote: currentQuote } = body;
@@ -210,77 +290,94 @@ export async function POST(request: NextRequest) {
     { role: "user", content: message },
   ];
 
-  let newQuote: CedearQuote | null = null;
-
-  try {
-    let claudeResponse = await callClaude(
-      apiKey,
-      buildSystemPrompt(currentQuote),
-      messages
-    );
-    let iterations = 0;
-
-    while (claudeResponse.stop_reason === "tool_use" && iterations < MAX_TOOL_ITERATIONS) {
-      iterations++;
-      const toolUse = claudeResponse.content.find(
-        (block): block is AnthropicToolUseBlock => block.type === "tool_use"
-      );
-      if (!toolUse) break;
-
-      messages.push({ role: "assistant", content: claudeResponse.content });
-
-      let toolResultText: string;
-      try {
-        const query = toolUse.input.query;
-        const found = await fetchCedearQuote(typeof query === "string" ? query : "");
-        newQuote = found;
-        toolResultText = formatQuoteContext(found);
-      } catch (err) {
-        toolResultText =
-          err instanceof CedearLookupError
-            ? err.message
-            : "No se pudo obtener la información solicitada.";
+  const stream = new ReadableStream<Uint8Array>({
+    async start(controller) {
+      const encoder = new TextEncoder();
+      function send(payload: Record<string, unknown>) {
+        controller.enqueue(encoder.encode(`${JSON.stringify(payload)}\n`));
       }
 
-      messages.push({
-        role: "user",
-        content: [
-          {
-            type: "tool_result",
-            tool_use_id: toolUse.id,
-            content: toolResultText,
-          },
-        ],
-      });
+      let newQuote: CedearQuote | null = null;
 
-      claudeResponse = await callClaude(
-        apiKey,
-        buildSystemPrompt(newQuote ?? currentQuote),
-        messages
-      );
-    }
+      try {
+        let iterations = 0;
+        let turn = await streamClaudeTurn(
+          apiKey,
+          buildSystemPrompt(currentQuote),
+          messages,
+          (text) => send({ type: "text", text })
+        );
 
-    const reply = claudeResponse.content
-      .filter(
-        (block): block is AnthropicTextBlock =>
-          block.type === "text" && Boolean(block.text)
-      )
-      .map((block) => block.text)
-      .join("\n")
-      .trim();
+        while (turn.stopReason === "tool_use" && iterations < MAX_TOOL_ITERATIONS) {
+          iterations++;
+          const toolUse = turn.content.find(
+            (block): block is AnthropicToolUseBlock => block.type === "tool_use"
+          );
+          if (!toolUse) break;
 
-    if (!reply) {
-      return NextResponse.json(
-        { error: "Claude no devolvió una respuesta" },
-        { status: 502 }
-      );
-    }
+          messages.push({ role: "assistant", content: turn.content });
 
-    return NextResponse.json({ reply, quote: newQuote });
-  } catch (err) {
-    if (err instanceof ChatError) {
-      return NextResponse.json({ error: err.message }, { status: err.status });
-    }
-    return NextResponse.json({ error: "Error inesperado" }, { status: 500 });
-  }
+          let toolResultText: string;
+          try {
+            const query = toolUse.input.query;
+            const found = await fetchCedearQuote(typeof query === "string" ? query : "");
+            newQuote = found;
+            toolResultText = formatQuoteContext(found);
+            send({ type: "quote", quote: newQuote });
+          } catch (err) {
+            toolResultText =
+              err instanceof CedearLookupError
+                ? err.message
+                : "No se pudo obtener la información solicitada.";
+          }
+
+          messages.push({
+            role: "user",
+            content: [
+              {
+                type: "tool_result",
+                tool_use_id: toolUse.id,
+                content: toolResultText,
+              },
+            ],
+          });
+
+          turn = await streamClaudeTurn(
+            apiKey,
+            buildSystemPrompt(newQuote ?? currentQuote),
+            messages,
+            (text) => send({ type: "text", text })
+          );
+        }
+
+        const reply = turn.content
+          .filter(
+            (block): block is AnthropicTextBlock =>
+              block.type === "text" && Boolean(block.text)
+          )
+          .map((block) => block.text)
+          .join("\n")
+          .trim();
+
+        if (!reply) {
+          send({ type: "error", error: "Claude no devolvió una respuesta" });
+        }
+      } catch (err) {
+        send({
+          type: "error",
+          error: err instanceof ChatError ? err.message : "Error inesperado",
+        });
+      } finally {
+        controller.close();
+      }
+    },
+  });
+
+  return new Response(stream, {
+    headers: {
+      "Content-Type": "application/x-ndjson; charset=utf-8",
+      "Cache-Control": "no-store",
+      "X-Content-Type-Options": "nosniff",
+    },
+  });
 }
