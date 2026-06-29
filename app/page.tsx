@@ -12,6 +12,7 @@ import {
 } from "recharts";
 import type { CedearQuote, HistoricalPoint } from "@/lib/cedear";
 import { ArchIcon } from "./components/ArchIcon";
+import { useCurrency, type Currency } from "@/lib/currency-context";
 
 interface DisplayTurn {
   id: string;
@@ -84,13 +85,15 @@ function formatChartDate(isoDate: string) {
 function PriceChart({
   historical,
   isUp,
+  rate,
 }: {
   historical: HistoricalPoint[];
   isUp: boolean;
+  rate: number;
 }) {
   const data = historical.map((point) => ({
     date: point.date,
-    close: point.close,
+    close: point.close * rate,
   }));
   const color = isUp ? UP_COLOR : DOWN_COLOR;
 
@@ -149,14 +152,20 @@ function PriceChart({
 }
 
 function QuoteCard({ quote }: { quote: CedearQuote }) {
+  const { currency, mepRate } = useCurrency();
   const isUp = quote.change >= 0;
+
+  const convertToArs = currency === "ARS" && Boolean(mepRate);
+  const rate = convertToArs ? (mepRate as number) : 1;
+  const displayCurrency = convertToArs ? "ARS" : quote.currency;
+
   return (
     <div className="mb-3 rounded-xl border border-line bg-background/40 p-4">
       <div className="flex flex-wrap items-baseline justify-between gap-2">
         <div>
           <p className="text-lg font-bold tracking-tight">{quote.companyName}</p>
           <p className="text-xs text-muted">
-            {quote.ticker} · {quote.exchangeName} · {quote.currency}
+            {quote.ticker} · {quote.exchangeName} · {displayCurrency}
           </p>
         </div>
         <span
@@ -170,7 +179,7 @@ function QuoteCard({ quote }: { quote: CedearQuote }) {
 
       <div className="mt-2 flex flex-wrap items-end gap-2">
         <span className="text-3xl font-bold tabular-nums">
-          {formatCurrency(quote.currentPrice, quote.currency)}
+          {formatCurrency(quote.currentPrice * rate, displayCurrency)}
         </span>
         <span
           className={`text-sm font-medium tabular-nums ${
@@ -178,12 +187,12 @@ function QuoteCard({ quote }: { quote: CedearQuote }) {
           }`}
         >
           {isUp ? "+" : ""}
-          {formatCurrency(quote.change, quote.currency)}
+          {formatCurrency(quote.change * rate, displayCurrency)}
         </span>
       </div>
 
       <div className="mt-3">
-        <PriceChart historical={quote.historical} isUp={isUp} />
+        <PriceChart historical={quote.historical} isUp={isUp} rate={rate} />
       </div>
     </div>
   );
@@ -269,6 +278,35 @@ function MessageBubble({
           ))}
         </div>
       )}
+    </div>
+  );
+}
+
+const CURRENCIES: Currency[] = ["USD", "ARS"];
+
+function CurrencyToggle() {
+  const { currency, setCurrency, mepRate } = useCurrency();
+
+  return (
+    <div className="flex shrink-0 items-center gap-1 rounded-full border border-line bg-surface p-1">
+      {CURRENCIES.map((option) => {
+        const disabled = option === "ARS" && !mepRate;
+        const active = currency === option;
+        return (
+          <button
+            key={option}
+            type="button"
+            disabled={disabled}
+            onClick={() => setCurrency(option)}
+            title={disabled ? "Cargando tipo de cambio…" : undefined}
+            className={`rounded-full px-3 py-1 text-xs font-semibold transition-colors disabled:cursor-not-allowed disabled:opacity-40 ${
+              active ? "bg-accent text-white" : "text-muted hover:text-foreground"
+            }`}
+          >
+            {option}
+          </button>
+        );
+      })}
     </div>
   );
 }
@@ -444,12 +482,15 @@ export default function Home() {
   return (
     <div className="flex h-screen flex-col bg-background text-foreground">
       <header className="shrink-0 px-4 py-4 shadow-sm shadow-black/30 sm:px-8">
-        <div className="mx-auto flex max-w-2xl items-center gap-3">
-          <ArchIcon className="h-8 w-8 shrink-0 text-[#4A90D9]" />
-          <div>
-            <h1 className="text-2xl font-bold tracking-tight">Alero</h1>
-            <p className="text-xs text-muted">Análisis de empresas con IA</p>
+        <div className="mx-auto flex max-w-2xl items-center justify-between gap-3">
+          <div className="flex items-center gap-3">
+            <ArchIcon className="h-8 w-8 shrink-0 text-[#4A90D9]" />
+            <div>
+              <h1 className="text-2xl font-bold tracking-tight">Alero</h1>
+              <p className="text-xs text-muted">Análisis de empresas con IA</p>
+            </div>
           </div>
+          <CurrencyToggle />
         </div>
       </header>
 
