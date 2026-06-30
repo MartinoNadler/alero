@@ -155,9 +155,10 @@ function QuoteCard({ quote }: { quote: CedearQuote }) {
   const { currency, mepRate } = useCurrency();
   const isUp = quote.change >= 0;
 
-  const convertToArs = currency === "ARS" && Boolean(mepRate);
-  const rate = convertToArs ? (mepRate as number) : 1;
-  const displayCurrency = convertToArs ? "ARS" : quote.currency;
+  const convertToArs = currency === "ARS" && quote.currency === "USD" && Boolean(mepRate);
+  const convertToUsd = currency === "USD" && quote.currency === "ARS" && Boolean(mepRate);
+  const rate = convertToArs ? (mepRate as number) : convertToUsd ? 1 / (mepRate as number) : 1;
+  const displayCurrency = convertToArs ? "ARS" : convertToUsd ? "USD" : quote.currency;
 
   return (
     <div className="mb-3 rounded-xl border border-line bg-background/40 p-4">
