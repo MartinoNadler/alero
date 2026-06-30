@@ -179,8 +179,9 @@ function buildQuote(symbol: string, result: YahooChartResult): CedearQuote {
 }
 
 // Acepta tanto un ticker exacto (ej. "GGAL.BA") como el nombre de una
-// empresa (ej. "Galicia"): primero intenta el ticker tal cual, y si no
-// hay datos, resuelve el nombre contra el buscador de Yahoo Finance.
+// empresa (ej. "Galicia"). Siempre intenta resolver el ticker .BA (CEDEAR
+// en Buenos Aires) antes de caer en el ticker de bolsa extranjera, para
+// evitar mostrar el precio del subyacente en USD en lugar del CEDEAR en ARS.
 export async function fetchCedearQuote(rawQuery: string): Promise<CedearQuote> {
   const trimmed = rawQuery.trim();
   if (!trimmed) {
@@ -188,26 +189,35 @@ export async function fetchCedearQuote(rawQuery: string): Promise<CedearQuote> {
   }
 
   const directSymbol = trimmed.toUpperCase();
-  let result = await fetchChartResult(directSymbol);
-  let symbol = directSymbol;
 
-  if (!result) {
-    const resolved = await searchSymbol(trimmed);
-    if (!resolved) {
-      throw new CedearLookupError(
-        `No se encontró ninguna empresa para "${rawQuery}"`,
-        404
-      );
-    }
-    symbol = resolved;
-    result = await fetchChartResult(symbol);
+  // Si el usuario ya escribió un ticker .BA explícito, usarlo directo.
+  if (directSymbol.endsWith(".BA")) {
+    const result = await fetchChartResult(directSymbol);
     if (!result) {
       throw new CedearLookupError(
         `No se encontró ninguna empresa para "${rawQuery}"`,
         404
       );
     }
+    return buildQuote(directSymbol, result);
   }
 
-  return buildQuote(symbol, result);
+  // Para cualquier otro input, buscar primero en Yahoo Finance para que
+  // pickBestSymbol pueda preferir la versión .BA (CEDEAR) si existe.
+  const resolved = await searchSymbol(trimmed);
+  if (resolved) {
+    const result = await fetchChartResult(resolved);
+    if (result) return buildQuote(resolved, result);
+  }
+
+  // Fallback: intentar el ticker tal cual (útil para tickers no .BA sin
+  // resultado en el buscador, como índices o instrumentos menos comunes).
+  const fallbackResult = await fetchChartResult(directSymbol);
+  if (!fallbackResult) {
+    throw new CedearLookupError(
+      `No se encontró ninguna empresa para "${rawQuery}"`,
+      404
+    );
+  }
+  return buildQuote(directSymbol, fallbackResult);
 }
