@@ -205,13 +205,25 @@ export async function fetchCedearQuote(rawQuery: string): Promise<CedearQuote> {
   // Para cualquier otro input, buscar primero en Yahoo Finance para que
   // pickBestSymbol pueda preferir la versión .BA (CEDEAR) si existe.
   const resolved = await searchSymbol(trimmed);
+
+  // Si el search ya devolvió un .BA, usarlo directamente.
+  if (resolved?.endsWith(".BA")) {
+    const result = await fetchChartResult(resolved);
+    if (result) return buildQuote(resolved, result);
+  }
+
+  // Si el search devolvió un ticker no-.BA (ej. TSLA de NASDAQ), intentar
+  // primero la versión CEDEAR (TSLA.BA) antes de aceptar el extranjero.
+  const baSymbol = (resolved ?? directSymbol) + ".BA";
+  const baResult = await fetchChartResult(baSymbol);
+  if (baResult) return buildQuote(baSymbol, baResult);
+
+  // Fallback: usar el resultado del search o el ticker directo.
   if (resolved) {
     const result = await fetchChartResult(resolved);
     if (result) return buildQuote(resolved, result);
   }
 
-  // Fallback: intentar el ticker tal cual (útil para tickers no .BA sin
-  // resultado en el buscador, como índices o instrumentos menos comunes).
   const fallbackResult = await fetchChartResult(directSymbol);
   if (!fallbackResult) {
     throw new CedearLookupError(
