@@ -92,43 +92,44 @@ async function fetchChartResult(symbol: string, days: number = HISTORY_DAYS): Pr
 // Entre varias coincidencias, preferimos el símbolo ".BA" (CEDEAR en Buenos
 // Aires) más corto: variantes como "GGALD.BA" (segmento dólar) suelen ser
 // más largas que el ticker estándar "GGAL.BA".
-function pickBestSymbol(quotes: YahooSearchQuote[]): string | null {
+interface SearchResult {
+  baSymbol: string | null;
+  baseSymbol: string | null;
+}
+
+function pickSymbols(quotes: YahooSearchQuote[]): SearchResult {
   const equities = quotes.filter(
     (q) => q.quoteType === "EQUITY" && typeof q.symbol === "string"
   );
-  if (equities.length === 0) return null;
 
   const cedears = equities.filter((q) => q.symbol.endsWith(".BA"));
-  if (cedears.length > 0) {
-    return cedears.reduce((shortest, q) =>
-      q.symbol.length < shortest.symbol.length ? q : shortest
-    ).symbol;
-  }
+  const others = equities.filter((q) => !q.symbol.endsWith(".BA"));
 
-  return equities[0].symbol;
+  const baSymbol =
+    cedears.length > 0
+      ? cedears.reduce((shortest, q) =>
+          q.symbol.length < shortest.symbol.length ? q : shortest
+        ).symbol
+      : null;
+
+  const baseSymbol = others.length > 0 ? others[0].symbol : null;
+
+  return { baSymbol, baseSymbol };
 }
 
-async function searchSymbol(query: string): Promise<string | null> {
+async function searchSymbol(query: string): Promise<SearchResult> {
   const url = `https://query1.finance.yahoo.com/v1/finance/search?q=${encodeURIComponent(
     query
   )}&quotesCount=10&newsCount=0`;
 
-  let response: Response;
   try {
-    response = await fetch(url, { headers: { "User-Agent": USER_AGENT } });
+    const response = await fetch(url, { headers: { "User-Agent": USER_AGENT } });
+    if (!response.ok) return { baSymbol: null, baseSymbol: null };
+    const data: YahooSearchResponse = await response.json();
+    return pickSymbols(data.quotes ?? []);
   } catch {
-    return null;
+    return { baSymbol: null, baseSymbol: null };
   }
-  if (!response.ok) return null;
-
-  let data: YahooSearchResponse;
-  try {
-    data = await response.json();
-  } catch {
-    return null;
-  }
-
-  return pickBestSymbol(data.quotes ?? []);
 }
 
 function buildHistorical(result: YahooChartResult): HistoricalPoint[] {
@@ -213,34 +214,31 @@ export async function fetchCedearQuote(rawQuery: string, days: number = HISTORY_
     return buildQuote(directSymbol, result);
   }
 
-  // Para cualquier otro input, buscar primero en Yahoo Finance para que
-  // pickBestSymbol pueda preferir la versión .BA (CEDEAR) si existe.
-  const resolved = await searchSymbol(trimmed);
+  // Buscar en Yahoo Finance: obtenemos tanto el .BA directo como el ticker base.
+  const { baSymbol, baseSymbol } = await searchSymbol(trimmed);
 
-  // Si el search ya devolvió un .BA, usarlo directamente.
-  if (resolved?.endsWith(".BA")) {
-    const result = await fetchChartResult(resolved, days);
-    if (result) return buildQuote(resolved, result);
+  // 1. Intentar baseSymbol + ".BA" primero (ej. AAPL → AAPL.BA).
+  //    Esto evita caer en CEDEARs recién listados (ej. AAPLC.BA) cuando
+  //    existe el CEDEAR establecido (AAPL.BA) con más historial.
+  if (baseSymbol) {
+    const result = await fetchChartResult(baseSymbol + ".BA", days);
+    if (result) return buildQuote(baseSymbol + ".BA", result);
   }
 
-  // Si el search devolvió un ticker no-.BA (ej. TSLA de NASDAQ), intentar
-  // primero la versión CEDEAR (TSLA.BA) antes de aceptar el extranjero.
-  const baSymbol = (resolved ?? directSymbol) + ".BA";
-  const baResult = await fetchChartResult(baSymbol, days);
-  if (baResult) return buildQuote(baSymbol, baResult);
-
-  // Fallback: usar el resultado del search o el ticker directo.
-  if (resolved) {
-    const result = await fetchChartResult(resolved, days);
-    if (result) return buildQuote(resolved, result);
+  // 2. Usar el .BA que encontró el search (ej. GGAL.BA cuando no hay base).
+  if (baSymbol) {
+    const result = await fetchChartResult(baSymbol, days);
+    if (result) return buildQuote(baSymbol, result);
   }
 
-  const fallbackResult = await fetchChartResult(directSymbol, days);
+  // 3. Fallback: ticker base sin .BA (mercado extranjero) o ticker directo.
+  const fallbackSymbol = baseSymbol ?? directSymbol;
+  const fallbackResult = await fetchChartResult(fallbackSymbol, days);
   if (!fallbackResult) {
     throw new CedearLookupError(
       `No se encontró ninguna empresa para "${rawQuery}"`,
       404
     );
   }
-  return buildQuote(directSymbol, fallbackResult);
+  return buildQuote(fallbackSymbol, fallbackResult);
 }
