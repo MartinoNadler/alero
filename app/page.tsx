@@ -180,7 +180,14 @@ function QuoteCard({ quote }: { quote: CedearQuote }) {
             <p className="text-xs text-muted">Sin datos suficientes para este período</p>
           </div>
         ) : (
-          <CandleChart historical={historical} rate={rate} />
+          <CandleChart
+            historical={historical}
+            rate={rate}
+            periodOptions={PERIODS}
+            selectedPeriod={period}
+            onPeriodChange={(value) => changePeriod(value as Period)}
+            isLoadingPeriod={loadingPeriod}
+          />
         )}
       </div>
 
