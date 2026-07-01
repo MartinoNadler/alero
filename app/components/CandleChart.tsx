@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   createChart,
   CrosshairMode,
@@ -14,6 +14,26 @@ import type { HistoricalPoint } from "@/lib/cedear";
 const UP_COLOR = "#196edc";
 const DOWN_COLOR = "#ef4444";
 
+function ExpandIcon() {
+  return (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="h-4 w-4">
+      <path d="M8 3H5a2 2 0 0 0-2 2v3" />
+      <path d="M21 8V5a2 2 0 0 0-2-2h-3" />
+      <path d="M3 16v3a2 2 0 0 0 2 2h3" />
+      <path d="M16 21h3a2 2 0 0 0 2-2v-3" />
+    </svg>
+  );
+}
+
+function CloseIcon() {
+  return (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="h-4 w-4">
+      <path d="M18 6 6 18" />
+      <path d="m6 6 12 12" />
+    </svg>
+  );
+}
+
 export default function CandleChart({
   historical,
   rate,
@@ -25,6 +45,7 @@ export default function CandleChart({
   const chartRef = useRef<IChartApi | null>(null);
   const candleRef = useRef<ISeriesApi<"Candlestick"> | null>(null);
   const volumeRef = useRef<ISeriesApi<"Histogram"> | null>(null);
+  const [isFullscreen, setIsFullscreen] = useState(false);
 
   useEffect(() => {
     const el = containerRef.current;
@@ -74,7 +95,12 @@ export default function CandleChart({
     volumeRef.current = volume;
 
     const ro = new ResizeObserver((entries) => {
-      if (entries[0]) chart.applyOptions({ width: entries[0].contentRect.width });
+      const entry = entries[0];
+      if (!entry) return;
+      chart.applyOptions({
+        width: entry.contentRect.width,
+        height: entry.contentRect.height,
+      });
     });
     ro.observe(el);
 
@@ -110,5 +136,37 @@ export default function CandleChart({
     chartRef.current.timeScale().fitContent();
   }, [historical, rate]);
 
-  return <div ref={containerRef} className="w-full" style={{ height: 280 }} />;
+  useEffect(() => {
+    if (!isFullscreen) return;
+
+    function onKeyDown(e: KeyboardEvent) {
+      if (e.key === "Escape") setIsFullscreen(false);
+    }
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [isFullscreen]);
+
+  return (
+    <div
+      className={
+        isFullscreen
+          ? "fixed inset-0 z-50 flex flex-col bg-background p-4"
+          : "relative w-full"
+      }
+    >
+      <button
+        type="button"
+        onClick={() => setIsFullscreen((v) => !v)}
+        aria-label={isFullscreen ? "Cerrar pantalla completa" : "Ver en pantalla completa"}
+        className="absolute right-2 top-2 z-10 flex h-7 w-7 items-center justify-center rounded-md bg-background/70 text-muted transition-colors hover:bg-white/10 hover:text-foreground"
+      >
+        {isFullscreen ? <CloseIcon /> : <ExpandIcon />}
+      </button>
+      <div
+        ref={containerRef}
+        className={isFullscreen ? "w-full flex-1" : "w-full"}
+        style={isFullscreen ? undefined : { height: 280 }}
+      />
+    </div>
+  );
 }
