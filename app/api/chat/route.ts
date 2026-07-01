@@ -1,6 +1,6 @@
 import { type NextRequest } from "next/server";
 import type { CedearQuote } from "@/lib/cedear";
-import { CedearLookupError, fetchCedearQuote } from "@/lib/yahoo-finance";
+import { CedearLookupError, fetchCedearQuote, fetchExtendedHistorical } from "@/lib/yahoo-finance";
 
 const ANTHROPIC_API_URL = "https://api.anthropic.com/v1/messages";
 const CLAUDE_MODEL = "claude-sonnet-4-6";
@@ -8,6 +8,7 @@ const MAX_TOKENS = 1024;
 const MAX_TOOL_ITERATIONS = 4;
 const TOOL_NAME = "buscar_empresa";
 const FOLLOWUP_TOOL_NAME = "sugerir_preguntas";
+const HISTORY_TOOL_NAME = "obtener_historico";
 const MAX_FOLLOWUP_QUESTIONS = 3;
 
 class ChatError extends Error {
@@ -90,11 +91,41 @@ const TOOLS = [
     },
   },
   {
+    name: HISTORY_TOOL_NAME,
+    description:
+      "Obtiene el histórico de precios de la empresa actualmente cargada para un período mayor a 30 días. Usá esta herramienta solo cuando el usuario pregunte sobre tendencias, movimientos o eventos de más de 30 días atrás y no puedas responder con los datos que ya tenés. Para 90 días usa intervalo diario, para 1 año semanal y para 5 años mensual, reduciendo el volumen de datos.",
+    input_schema: {
+      type: "object",
+      properties: {
+        days: {
+          type: "number",
+          enum: [90, 365, 1825],
+          description: "Período en días: 90 para ~3 meses, 365 para ~1 año, 1825 para ~5 años.",
+        },
+      },
+      required: ["days"],
+    },
+  },
+  {
     type: "web_search_20260209",
     name: "web_search",
     max_uses: 3,
   },
 ];
+
+function formatExtendedHistorical(
+  historical: import("@/lib/cedear").HistoricalPoint[],
+  days: number
+): string {
+  const label = days >= 1825 ? "5 años" : days >= 365 ? "1 año" : "90 días";
+  const table = historical
+    .map(
+      (p) =>
+        `${p.date}, apertura ${p.open}, máximo ${p.high}, mínimo ${p.low}, cierre ${p.close}, volumen ${p.volume}`
+    )
+    .join("\n");
+  return `Histórico extendido (últimos ${label}):\n${table}`;
+}
 
 function formatQuoteContext(quote: CedearQuote): string {
   const historicalTable = quote.historical
@@ -147,6 +178,7 @@ No agregues introducción, saludo ni cierre fuera de esas cuatro secciones.
 - Nunca recomiendes comprar, vender o mantener ningún activo, ni opines sobre si es buen o mal momento para operar. Limitate a describir lo que muestran los datos.
 - No uses la palabra "ticker"; decí "empresa" o "código".
 - Usá lenguaje simple, sin jerga financiera. No uses Markdown (sin #, sin **).
+- Si el usuario pregunta sobre un período mayor a 30 días (ej: "últimos 3 meses", "en el último año", "desde enero", o menciona una fecha de más de 30 días atrás), llamá primero a la herramienta "${HISTORY_TOOL_NAME}" con el período apropiado (90, 365 o 1825 días) antes de responder. No la uses si ya tenés los datos necesarios en el histórico de 30 días.
 - Los datos de precio, variación e histórico de volumen no explican por sí solos el motivo de un movimiento. Si la pregunta del usuario es sobre la causa de una suba o baja, noticias, eventos corporativos (resultados, fusiones, demandas, anuncios) u otros fundamentos que no están en los datos numéricos que tenés, usá la herramienta de búsqueda web para complementar tu respuesta antes de responder. Si podés responder completamente con los datos de precio y volumen que ya tenés, no uses la búsqueda web.
 - Cuando tu respuesta se base en resultados de la búsqueda web, sé breve: máximo 150 palabras, yendo directo al punto — la causa principal del movimiento y 1 o 2 datos de contexto. Nada de listas largas ni de enumerar varios factores.
 - Después de escribir tu respuesta (el análisis completo o una respuesta puntual), llamá siempre a la herramienta "${FOLLOWUP_TOOL_NAME}" con 2 o 3 preguntas de seguimiento. Tienen que basarse en datos concretos que ya mencionaste (una fecha puntual, una variación específica, un volumen inusual, una anomalía), nunca preguntas genéricas como "¿querés saber algo más?". Escribilas en primera persona, tal como las escribiría el usuario, listas para enviar (ej: "¿Por qué bajó tan fuerte el 25 de junio?"). No llames a esta herramienta si todavía no escribiste ninguna respuesta (por ejemplo, mientras estás buscando una empresa).
@@ -379,6 +411,7 @@ export async function POST(request: NextRequest) {
 
           const searchToolUse = toolUses.find((t) => t.name === TOOL_NAME);
           const followUpToolUse = toolUses.find((t) => t.name === FOLLOWUP_TOOL_NAME);
+          const historyToolUse = toolUses.find((t) => t.name === HISTORY_TOOL_NAME);
 
           if (followUpToolUse) {
             const rawQuestions = followUpToolUse.input.questions;
@@ -388,6 +421,45 @@ export async function POST(request: NextRequest) {
                 .slice(0, MAX_FOLLOWUP_QUESTIONS);
               if (questions.length > 0) send({ type: "questions", questions });
             }
+          }
+
+          // Herramienta de histórico extendido: fetcha más días del ticker actual.
+          if (historyToolUse && !searchToolUse) {
+            const activeTicker = (newQuote ?? currentQuote)?.ticker;
+            const rawDays = historyToolUse.input.days;
+            const days = typeof rawDays === "number" ? rawDays : 90;
+
+            messages.push({ role: "assistant", content: turn.content });
+
+            let historyResultText: string;
+            if (activeTicker) {
+              const historical = await fetchExtendedHistorical(activeTicker, days);
+              historyResultText = historical.length > 0
+                ? formatExtendedHistorical(historical, days)
+                : "No se pudo obtener el histórico extendido.";
+            } else {
+              historyResultText = "No hay ninguna empresa cargada para obtener el histórico.";
+            }
+
+            const historyResults: AnthropicToolResultBlock[] = [
+              { type: "tool_result", tool_use_id: historyToolUse.id, content: historyResultText },
+            ];
+            if (followUpToolUse) {
+              historyResults.push({
+                type: "tool_result",
+                tool_use_id: followUpToolUse.id,
+                content: "ok",
+              });
+            }
+            messages.push({ role: "user", content: historyResults });
+
+            turn = await streamClaudeTurn(
+              apiKey,
+              buildSystemPrompt(newQuote ?? currentQuote, askedQuestions),
+              messages,
+              (text) => send({ type: "text", text })
+            );
+            continue;
           }
 
           if (!searchToolUse) break;

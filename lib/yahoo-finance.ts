@@ -61,10 +61,11 @@ interface YahooSearchResponse {
 async function fetchChartResult(symbol: string, days: number = HISTORY_DAYS): Promise<YahooChartResult | null> {
   const period2 = Math.floor(Date.now() / 1000);
   const period1 = period2 - days * 24 * 60 * 60;
+  const interval = days > 365 ? "1mo" : days > 90 ? "1wk" : "1d";
 
   const url = `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(
     symbol
-  )}?period1=${period1}&period2=${period2}&interval=1d`;
+  )}?period1=${period1}&period2=${period2}&interval=${interval}`;
 
   let response: Response;
   try {
@@ -130,37 +131,29 @@ async function searchSymbol(query: string): Promise<string | null> {
   return pickBestSymbol(data.quotes ?? []);
 }
 
-function buildQuote(symbol: string, result: YahooChartResult): CedearQuote {
-  const { meta, timestamp, indicators } = result;
+function buildHistorical(result: YahooChartResult): HistoricalPoint[] {
+  const { timestamp, indicators } = result;
   const quote = indicators.quote[0];
-
   const historical: HistoricalPoint[] = [];
+
   for (let i = 0; i < timestamp.length; i++) {
     const open = quote.open[i];
     const high = quote.high[i];
     const low = quote.low[i];
     const close = quote.close[i];
     const volume = quote.volume[i];
-
-    if (
-      open == null ||
-      high == null ||
-      low == null ||
-      close == null ||
-      volume == null
-    ) {
-      continue;
-    }
-
+    if (open == null || high == null || low == null || close == null || volume == null) continue;
     historical.push({
       date: new Date(timestamp[i] * 1000).toISOString().slice(0, 10),
-      open,
-      high,
-      low,
-      close,
-      volume,
+      open, high, low, close, volume,
     });
   }
+  return historical;
+}
+
+function buildQuote(symbol: string, result: YahooChartResult): CedearQuote {
+  const { meta } = result;
+  const historical = buildHistorical(result);
 
   const currentPrice = meta.regularMarketPrice;
   const previousClose = meta.previousClose ?? meta.chartPreviousClose;
@@ -179,6 +172,21 @@ function buildQuote(symbol: string, result: YahooChartResult): CedearQuote {
     changePercent,
     historical,
   };
+}
+
+// Obtiene solo el histórico de un ticker ya resuelto (ej. "MELI.BA") para
+// un período extendido. Usa intervalos semanales/mensuales para períodos
+// largos y así mantener el volumen de datos bajo.
+export async function fetchExtendedHistorical(
+  ticker: string,
+  days: number
+): Promise<HistoricalPoint[]> {
+  try {
+    const result = await fetchChartResult(ticker, days);
+    return result ? buildHistorical(result) : [];
+  } catch {
+    return [];
+  }
 }
 
 // Acepta tanto un ticker exacto (ej. "GGAL.BA") como el nombre de una
