@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import {
   CartesianGrid,
   Line,
@@ -77,19 +77,32 @@ function formatCurrency(value: number, currency: string) {
   }
 }
 
-function formatChartDate(isoDate: string) {
-  const [, month, day] = isoDate.split("-");
-  return `${day}/${month}`;
+type Period = 30 | 90 | 365 | 1825;
+
+const PERIODS: { value: Period; label: string }[] = [
+  { value: 30, label: "30d" },
+  { value: 90, label: "90d" },
+  { value: 365, label: "1a" },
+  { value: 1825, label: "5a" },
+];
+
+function formatChartDate(isoDate: string, period: Period) {
+  const [year, month, day] = isoDate.split("-");
+  if (period <= 90) return `${day}/${month}`;
+  if (period <= 365) return `${month}/${year.slice(2)}`;
+  return year;
 }
 
 function PriceChart({
   historical,
   isUp,
   rate,
+  period,
 }: {
   historical: HistoricalPoint[];
   isUp: boolean;
   rate: number;
+  period: Period;
 }) {
   const data = historical.map((point) => ({
     date: point.date,
@@ -103,7 +116,7 @@ function PriceChart({
         <CartesianGrid stroke="#ffffff0f" vertical={false} />
         <XAxis
           dataKey="date"
-          tickFormatter={formatChartDate}
+          tickFormatter={(d) => formatChartDate(d, period)}
           stroke="#6b7280"
           fontSize={11}
           tickLine={false}
@@ -153,12 +166,33 @@ function PriceChart({
 
 function QuoteCard({ quote }: { quote: CedearQuote }) {
   const { currency, mepRate } = useCurrency();
-  const isUp = quote.change >= 0;
+  const [period, setPeriod] = useState<Period>(30);
+  const [historical, setHistorical] = useState<HistoricalPoint[]>(quote.historical);
+  const [loadingPeriod, setLoadingPeriod] = useState(false);
 
+  const isUp = quote.change >= 0;
   const convertToArs = currency === "ARS" && quote.currency === "USD" && Boolean(mepRate);
   const convertToUsd = currency === "USD" && quote.currency === "ARS" && Boolean(mepRate);
   const rate = convertToArs ? (mepRate as number) : convertToUsd ? 1 / (mepRate as number) : 1;
   const displayCurrency = convertToArs ? "ARS" : convertToUsd ? "USD" : quote.currency;
+
+  const changePeriod = useCallback(async (next: Period) => {
+    setPeriod(next);
+    if (next === 30) {
+      setHistorical(quote.historical);
+      return;
+    }
+    setLoadingPeriod(true);
+    try {
+      const res = await fetch(`/api/cedear/${encodeURIComponent(quote.ticker)}?days=${next}`);
+      if (res.ok) {
+        const data: CedearQuote = await res.json();
+        setHistorical(data.historical);
+      }
+    } finally {
+      setLoadingPeriod(false);
+    }
+  }, [quote.ticker, quote.historical]);
 
   return (
     <div className="mb-3 rounded-xl border border-line bg-background/40 p-4">
@@ -192,8 +226,30 @@ function QuoteCard({ quote }: { quote: CedearQuote }) {
         </span>
       </div>
 
-      <div className="mt-3">
-        <PriceChart historical={quote.historical} isUp={isUp} rate={rate} />
+      <div className="relative mt-3">
+        {loadingPeriod && (
+          <div className="absolute inset-0 z-10 flex items-center justify-center rounded-lg bg-background/60">
+            <span className="text-xs text-muted">Cargando…</span>
+          </div>
+        )}
+        <PriceChart historical={historical} isUp={isUp} rate={rate} period={period} />
+      </div>
+
+      <div className="mt-2 flex justify-end gap-1">
+        {PERIODS.map(({ value, label }) => (
+          <button
+            key={value}
+            type="button"
+            onClick={() => changePeriod(value)}
+            className={`rounded-md px-2 py-0.5 text-xs font-medium transition-colors ${
+              period === value
+                ? "bg-accent text-white"
+                : "text-muted hover:text-foreground"
+            }`}
+          >
+            {label}
+          </button>
+        ))}
       </div>
     </div>
   );

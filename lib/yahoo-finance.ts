@@ -4,6 +4,9 @@ const USER_AGENT =
   "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36";
 const HISTORY_DAYS = 30;
 
+export const VALID_PERIODS = [30, 90, 365, 1825] as const;
+export type HistoryDays = (typeof VALID_PERIODS)[number];
+
 export class CedearLookupError extends Error {
   status: number;
 
@@ -55,9 +58,9 @@ interface YahooSearchResponse {
   quotes?: YahooSearchQuote[];
 }
 
-async function fetchChartResult(symbol: string): Promise<YahooChartResult | null> {
+async function fetchChartResult(symbol: string, days: number = HISTORY_DAYS): Promise<YahooChartResult | null> {
   const period2 = Math.floor(Date.now() / 1000);
-  const period1 = period2 - HISTORY_DAYS * 24 * 60 * 60;
+  const period1 = period2 - days * 24 * 60 * 60;
 
   const url = `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(
     symbol
@@ -182,7 +185,7 @@ function buildQuote(symbol: string, result: YahooChartResult): CedearQuote {
 // empresa (ej. "Galicia"). Siempre intenta resolver el ticker .BA (CEDEAR
 // en Buenos Aires) antes de caer en el ticker de bolsa extranjera, para
 // evitar mostrar el precio del subyacente en USD en lugar del CEDEAR en ARS.
-export async function fetchCedearQuote(rawQuery: string): Promise<CedearQuote> {
+export async function fetchCedearQuote(rawQuery: string, days: number = HISTORY_DAYS): Promise<CedearQuote> {
   const trimmed = rawQuery.trim();
   if (!trimmed) {
     throw new CedearLookupError("Ingresá el nombre o código de una empresa", 400);
@@ -192,7 +195,7 @@ export async function fetchCedearQuote(rawQuery: string): Promise<CedearQuote> {
 
   // Si el usuario ya escribió un ticker .BA explícito, usarlo directo.
   if (directSymbol.endsWith(".BA")) {
-    const result = await fetchChartResult(directSymbol);
+    const result = await fetchChartResult(directSymbol, days);
     if (!result) {
       throw new CedearLookupError(
         `No se encontró ninguna empresa para "${rawQuery}"`,
@@ -208,23 +211,23 @@ export async function fetchCedearQuote(rawQuery: string): Promise<CedearQuote> {
 
   // Si el search ya devolvió un .BA, usarlo directamente.
   if (resolved?.endsWith(".BA")) {
-    const result = await fetchChartResult(resolved);
+    const result = await fetchChartResult(resolved, days);
     if (result) return buildQuote(resolved, result);
   }
 
   // Si el search devolvió un ticker no-.BA (ej. TSLA de NASDAQ), intentar
   // primero la versión CEDEAR (TSLA.BA) antes de aceptar el extranjero.
   const baSymbol = (resolved ?? directSymbol) + ".BA";
-  const baResult = await fetchChartResult(baSymbol);
+  const baResult = await fetchChartResult(baSymbol, days);
   if (baResult) return buildQuote(baSymbol, baResult);
 
   // Fallback: usar el resultado del search o el ticker directo.
   if (resolved) {
-    const result = await fetchChartResult(resolved);
+    const result = await fetchChartResult(resolved, days);
     if (result) return buildQuote(resolved, result);
   }
 
-  const fallbackResult = await fetchChartResult(directSymbol);
+  const fallbackResult = await fetchChartResult(directSymbol, days);
   if (!fallbackResult) {
     throw new CedearLookupError(
       `No se encontró ninguna empresa para "${rawQuery}"`,

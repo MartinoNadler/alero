@@ -1,14 +1,17 @@
 import { NextResponse, type NextRequest } from "next/server";
-import { CedearLookupError, fetchCedearQuote } from "@/lib/yahoo-finance";
+import { CedearLookupError, fetchCedearQuote, VALID_PERIODS } from "@/lib/yahoo-finance";
 
 export async function GET(
-  _request: NextRequest,
+  request: NextRequest,
   { params }: { params: Promise<{ ticker: string }> }
 ) {
   const { ticker } = await params;
 
+  const daysParam = request.nextUrl.searchParams.get("days");
+  const days = VALID_PERIODS.find((p) => p === Number(daysParam)) ?? 30;
+
   try {
-    const quote = await fetchCedearQuote(ticker ?? "");
+    const quote = await fetchCedearQuote(ticker ?? "", days);
     return NextResponse.json(quote);
   } catch (err) {
     if (err instanceof CedearLookupError) {
