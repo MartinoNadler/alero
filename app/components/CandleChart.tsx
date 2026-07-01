@@ -7,12 +7,27 @@ import {
   ColorType,
   CandlestickSeries,
   HistogramSeries,
+  LineSeries,
 } from "lightweight-charts";
 import type { IChartApi, ISeriesApi, Time } from "lightweight-charts";
 import type { HistoricalPoint } from "@/lib/cedear";
 
 const UP_COLOR = "#196edc";
 const DOWN_COLOR = "#ef4444";
+const SMA_PERIOD = 20;
+
+function calculateSma(points: { time: Time; close: number }[], period: number) {
+  const result: { time: Time; value: number }[] = [];
+  let sum = 0;
+  for (let i = 0; i < points.length; i++) {
+    sum += points[i].close;
+    if (i >= period) sum -= points[i - period].close;
+    if (i >= period - 1) {
+      result.push({ time: points[i].time, value: sum / period });
+    }
+  }
+  return result;
+}
 
 function ExpandIcon() {
   return (
@@ -45,6 +60,7 @@ export default function CandleChart({
   const chartRef = useRef<IChartApi | null>(null);
   const candleRef = useRef<ISeriesApi<"Candlestick"> | null>(null);
   const volumeRef = useRef<ISeriesApi<"Histogram"> | null>(null);
+  const smaRef = useRef<ISeriesApi<"Line"> | null>(null);
   const [isFullscreen, setIsFullscreen] = useState(false);
 
   useEffect(() => {
@@ -90,9 +106,19 @@ export default function CandleChart({
       scaleMargins: { top: 0.8, bottom: 0 },
     });
 
+    const sma = chart.addSeries(LineSeries, {
+      color: "rgba(255, 255, 255, 0.35)",
+      lineWidth: 1,
+      priceLineVisible: false,
+      lastValueVisible: false,
+      crosshairMarkerVisible: false,
+      visible: false,
+    });
+
     chartRef.current = chart;
     candleRef.current = candle;
     volumeRef.current = volume;
+    smaRef.current = sma;
 
     const ro = new ResizeObserver((entries) => {
       const entry = entries[0];
@@ -110,11 +136,12 @@ export default function CandleChart({
       chartRef.current = null;
       candleRef.current = null;
       volumeRef.current = null;
+      smaRef.current = null;
     };
   }, []);
 
   useEffect(() => {
-    if (!candleRef.current || !volumeRef.current || !chartRef.current) return;
+    if (!candleRef.current || !volumeRef.current || !smaRef.current || !chartRef.current) return;
     if (historical.length === 0) return;
 
     const candleData = historical.map((p) => ({
@@ -133,6 +160,12 @@ export default function CandleChart({
 
     candleRef.current.setData(candleData);
     volumeRef.current.setData(volumeData);
+    smaRef.current.setData(
+      calculateSma(
+        candleData.map((p) => ({ time: p.time, close: p.close })),
+        SMA_PERIOD
+      )
+    );
     chartRef.current.timeScale().fitContent();
   }, [historical, rate]);
 
@@ -144,6 +177,10 @@ export default function CandleChart({
     }
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
+  }, [isFullscreen]);
+
+  useEffect(() => {
+    smaRef.current?.applyOptions({ visible: isFullscreen });
   }, [isFullscreen]);
 
   return (
