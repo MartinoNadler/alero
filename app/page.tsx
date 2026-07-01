@@ -37,8 +37,25 @@ const DOWN_COLOR = "#ef4444";
 
 const ANALYSIS_SECTION_TITLES = ["Precio actual", "Tendencia", "Volumen", "Volatilidad"];
 
-const DISCLAIMER_TEXT =
-  "Este análisis tiene carácter exclusivamente informativo y educativo. No constituye asesoramiento financiero, recomendación de inversión ni oferta de compra o venta de valores negociables en los términos de la Ley N° 26.831. Las decisiones de inversión son responsabilidad exclusiva del usuario. Rentabilidad pasada no garantiza resultados futuros.";
+const DISCLAIMER_SECTIONS = [
+  {
+    title: "Qué es Alero",
+    body: "Alero es una herramienta de análisis informativo que muestra datos de mercado de CEDEARs y empresas cotizantes, combinados con inteligencia artificial para facilitar su interpretación. Está pensada para inversores no profesionales que quieren entender mejor lo que muestran los números, sin reemplazar a un asesor financiero.",
+  },
+  {
+    title: "No es asesoramiento financiero",
+    body: "Los análisis, respuestas y visualizaciones que genera Alero tienen carácter exclusivamente informativo y educativo. No constituyen asesoramiento financiero, recomendación de inversión ni oferta de compra o venta de valores negociables en los términos de la Ley N° 26.831 (Mercado de Capitales). Las decisiones de inversión son responsabilidad exclusiva del usuario. La rentabilidad pasada no garantiza resultados futuros.",
+    highlight: true,
+  },
+  {
+    title: "Fuentes de datos",
+    body: "Los precios y datos históricos provienen de Yahoo Finance y pueden presentar demoras o diferencias respecto a los valores en tiempo real de los mercados. El tipo de cambio de referencia (dólar MEP) se obtiene de Bluelytics. Alero no garantiza la exactitud, completitud ni vigencia de ningún dato mostrado.",
+  },
+  {
+    title: "Base legal",
+    body: "De acuerdo con la Resolución General 1002/2024 de la CNV, el análisis de carácter general sobre instrumentos financieros no constituye asesoramiento en inversiones. Alero no está registrada como Agente Asesor Global de Inversiones ni como ninguna otra figura regulada ante la CNV.",
+  },
+];
 
 interface AnalysisSection {
   title: string;
@@ -379,30 +396,63 @@ function DisclaimerModal({ onClose }: { onClose: () => void }) {
 
   return (
     <div
-      className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4 backdrop-blur-sm"
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4 backdrop-blur-sm"
       onClick={onClose}
     >
       <div
-        className="w-full max-w-md animate-message-in rounded-2xl border border-line bg-surface p-8"
+        className="flex w-full max-w-lg animate-message-in flex-col rounded-2xl border border-line bg-surface shadow-2xl"
         onClick={(e) => e.stopPropagation()}
       >
-        <div className="flex items-start justify-between gap-4">
-          <h2 className="text-base font-bold">Aviso legal</h2>
+        {/* Header */}
+        <div className="flex items-center justify-between border-b border-line px-6 py-4">
+          <div>
+            <h2 className="text-base font-bold">Aviso legal</h2>
+            <p className="text-xs text-muted">Leé esto antes de tomar decisiones de inversión</p>
+          </div>
           <button
             type="button"
             onClick={onClose}
             aria-label="Cerrar"
-            className="shrink-0 text-muted transition-colors hover:text-foreground"
+            className="flex h-7 w-7 items-center justify-center rounded-full text-muted transition-colors hover:bg-white/5 hover:text-foreground"
           >
             ✕
           </button>
         </div>
-        <div className="mt-4 text-sm leading-relaxed text-foreground/90">
-          {DISCLAIMER_TEXT.split("\n\n").map((paragraph, i) => (
-            <p key={i} className={i > 0 ? "mt-2" : undefined}>
-              {paragraph}
-            </p>
-          ))}
+
+        {/* Sections */}
+        <div className="max-h-[70vh] overflow-y-auto px-6 py-5">
+          <div className="space-y-5">
+            {DISCLAIMER_SECTIONS.map((section) => (
+              <div
+                key={section.title}
+                className={
+                  section.highlight
+                    ? "rounded-xl border border-down/20 bg-down/5 p-4"
+                    : "border-b border-line/50 pb-5 last:border-0 last:pb-0"
+                }
+              >
+                <p
+                  className={`mb-1.5 text-xs font-semibold uppercase tracking-wide ${
+                    section.highlight ? "text-down" : "text-muted"
+                  }`}
+                >
+                  {section.title}
+                </p>
+                <p className="text-sm leading-relaxed text-foreground/80">{section.body}</p>
+              </div>
+            ))}
+          </div>
+        </div>
+
+        {/* Footer */}
+        <div className="border-t border-line px-6 py-4">
+          <button
+            type="button"
+            onClick={onClose}
+            className="w-full rounded-xl bg-accent px-4 py-2.5 text-sm font-bold text-white transition-all hover:bg-accent/90"
+          >
+            Entendido
+          </button>
         </div>
       </div>
     </div>
