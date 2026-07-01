@@ -181,11 +181,14 @@ function PriceChart({
   );
 }
 
+const MIN_CHART_POINTS = 5;
+
 function QuoteCard({ quote }: { quote: CedearQuote }) {
   const { currency, mepRate } = useCurrency();
   const [period, setPeriod] = useState<Period>(30);
   const [historical, setHistorical] = useState<HistoricalPoint[]>(quote.historical);
   const [loadingPeriod, setLoadingPeriod] = useState(false);
+  const [insufficientData, setInsufficientData] = useState(false);
 
   const isUp = quote.change >= 0;
   const convertToArs = currency === "ARS" && quote.currency === "USD" && Boolean(mepRate);
@@ -195,6 +198,7 @@ function QuoteCard({ quote }: { quote: CedearQuote }) {
 
   const changePeriod = useCallback(async (next: Period) => {
     setPeriod(next);
+    setInsufficientData(false);
     if (next === 30) {
       setHistorical(quote.historical);
       return;
@@ -204,7 +208,11 @@ function QuoteCard({ quote }: { quote: CedearQuote }) {
       const res = await fetch(`/api/cedear/${encodeURIComponent(quote.ticker)}?days=${next}`);
       if (res.ok) {
         const data: CedearQuote = await res.json();
-        setHistorical(data.historical);
+        if (data.historical.length >= MIN_CHART_POINTS) {
+          setHistorical(data.historical);
+        } else {
+          setInsufficientData(true);
+        }
       }
     } finally {
       setLoadingPeriod(false);
@@ -249,7 +257,13 @@ function QuoteCard({ quote }: { quote: CedearQuote }) {
             <span className="text-xs text-muted">Cargando…</span>
           </div>
         )}
-        <PriceChart historical={historical} isUp={isUp} rate={rate} period={period} />
+        {insufficientData ? (
+          <div className="flex h-[220px] items-center justify-center rounded-lg border border-line/40 bg-background/20">
+            <p className="text-xs text-muted">Sin datos suficientes para este período</p>
+          </div>
+        ) : (
+          <PriceChart historical={historical} isUp={isUp} rate={rate} period={period} />
+        )}
       </div>
 
       <div className="mt-2 flex justify-end gap-1">
