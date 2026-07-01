@@ -1,18 +1,15 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import {
-  CartesianGrid,
-  Line,
-  LineChart,
-  ResponsiveContainer,
-  Tooltip,
-  XAxis,
-  YAxis,
-} from "recharts";
+import dynamic from "next/dynamic";
 import type { CedearQuote, HistoricalPoint } from "@/lib/cedear";
 import { ArchIcon } from "./components/ArchIcon";
 import { useCurrency, type Currency } from "@/lib/currency-context";
+
+const CandleChart = dynamic(() => import("./components/CandleChart"), {
+  ssr: false,
+  loading: () => <div className="w-full" style={{ height: 280 }} />,
+});
 
 interface DisplayTurn {
   id: string;
@@ -32,8 +29,6 @@ const WELCOME_TURN: DisplayTurn = {
 
 const SUGGESTIONS = ["Apple", "Tesla", "Galicia", "MercadoLibre"];
 
-const UP_COLOR = "#196edc";
-const DOWN_COLOR = "#ef4444";
 
 const ANALYSIS_SECTION_TITLES = ["Precio actual", "Tendencia", "Volumen", "Volatilidad"];
 
@@ -103,83 +98,6 @@ const PERIODS: { value: Period; label: string }[] = [
   { value: 1825, label: "5a" },
 ];
 
-function formatChartDate(isoDate: string, period: Period) {
-  const [year, month, day] = isoDate.split("-");
-  if (period <= 90) return `${day}/${month}`;
-  if (period <= 365) return `${month}/${year.slice(2)}`;
-  return year;
-}
-
-function PriceChart({
-  historical,
-  isUp,
-  rate,
-  period,
-}: {
-  historical: HistoricalPoint[];
-  isUp: boolean;
-  rate: number;
-  period: Period;
-}) {
-  const data = historical.map((point) => ({
-    date: point.date,
-    close: point.close * rate,
-  }));
-  const color = isUp ? UP_COLOR : DOWN_COLOR;
-
-  return (
-    <ResponsiveContainer width="100%" height={220}>
-      <LineChart data={data} margin={{ top: 8, right: 4, bottom: 0, left: 4 }}>
-        <CartesianGrid stroke="#ffffff0f" vertical={false} />
-        <XAxis
-          dataKey="date"
-          tickFormatter={(d) => formatChartDate(d, period)}
-          stroke="#6b7280"
-          fontSize={11}
-          tickLine={false}
-          axisLine={false}
-          minTickGap={28}
-        />
-        <YAxis
-          orientation="right"
-          domain={["auto", "auto"]}
-          stroke="#6b7280"
-          fontSize={11}
-          tickLine={false}
-          axisLine={false}
-          width={52}
-          tickFormatter={(value: number) => value.toFixed(0)}
-        />
-        <Tooltip
-          contentStyle={{
-            background: "#12121a",
-            border: "1px solid #232733",
-            borderRadius: 8,
-            fontSize: 12,
-          }}
-          labelStyle={{ color: "#6b7280" }}
-          itemStyle={{ color: "#e5e7eb" }}
-          formatter={(
-            value: number | undefined | null | string | readonly (string | number)[]
-          ) => {
-            if (typeof value !== "number") return ["", "Cierre"];
-            return [value.toFixed(2), "Cierre"];
-          }}
-        />
-        <Line
-          type="monotone"
-          dataKey="close"
-          stroke={color}
-          strokeWidth={2}
-          dot={false}
-          activeDot={{ r: 4 }}
-          isAnimationActive
-          animationDuration={500}
-        />
-      </LineChart>
-    </ResponsiveContainer>
-  );
-}
 
 const MIN_CHART_POINTS = 5;
 
@@ -262,7 +180,7 @@ function QuoteCard({ quote }: { quote: CedearQuote }) {
             <p className="text-xs text-muted">Sin datos suficientes para este período</p>
           </div>
         ) : (
-          <PriceChart historical={historical} isUp={isUp} rate={rate} period={period} />
+          <CandleChart historical={historical} rate={rate} />
         )}
       </div>
 
